@@ -2310,9 +2310,9 @@ static Py_ssize_t cdataowning_size_bytes(CDataObject *cd)
     Py_ssize_t size = _cdata_var_byte_size(cd);
     if (size < 0) {
         if (cd->c_type->ct_flags & CT_POINTER)
-            size = cd->c_type->ct_itemdescr->ct_size;
+            size = cffi_get_size(cd->c_type->ct_itemdescr);
         else if (cd->c_type->ct_flags & CT_ARRAY)
-            size = get_array_length(cd) * cd->c_type->ct_itemdescr->ct_size;
+            size = get_array_length(cd) * cffi_get_size(cd->c_type->ct_itemdescr);
         else
             size = cffi_get_size(cd->c_type);
     }
