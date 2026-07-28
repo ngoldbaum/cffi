@@ -2600,7 +2600,6 @@ def test_emit_c_code_is_interpreter_independent():
     # the emitted source must be a pure function of the FFI object, with
     # no #defines derived from the interpreter running the generator
     import io
-    assert recompiler.USE_LIMITED_API   # constant on all supported Pythons
     ffi = FFI()
     ffi.cdef("int ff_interp_indep(int);")
     ffi.set_source("_CFFI_interp_indep",

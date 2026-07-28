@@ -82,19 +82,10 @@ def _set_py_limited_api(Extension, kwds):
     it doesn't so far, creating troubles.  That's why we check
     for "not hasattr(sys, 'gettotalrefcount')" (the 2.7 compatible equivalent
     of 'd' not in sys.abiflags). (http://bugs.python.org/issue28401)
-
-    On Windows, with CPython <= 3.4, it's better not to use py_limited_api
-    because virtualenv *still* doesn't copy PYTHON3.DLL on these versions.
-    Recently (2020) we started shipping only >= 3.5 wheels, though.  So
-    we'll give it another try and set py_limited_api on Windows >= 3.5.
     """
     from cffi._shimmed_dist_utils import log
-    from cffi import recompiler
 
     if ('py_limited_api' not in kwds and not hasattr(sys, 'gettotalrefcount')
-            and recompiler.USE_LIMITED_API
-            # unlike USE_LIMITED_API, checking the running interpreter is
-            # correct here: setuptools generates and compiles in one process
             and (not sysconfig.get_config_var("Py_GIL_DISABLED")
                  or sys.version_info >= (3, 15))):
         import setuptools

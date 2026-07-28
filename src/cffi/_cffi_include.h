@@ -13,16 +13,6 @@
    In that case, we guess what pyconfig.h will do to the macros above,
    and check our guess after the #include.
 
-   Note that on Windows, with CPython 3.x, you need >= 3.5 and virtualenv
-   version >= 16.0.0.  With older versions of either, you don't get a
-   copy of PYTHON3.DLL in the virtualenv.  We can't check the version of
-   CPython *before* we even include pyconfig.h.  ffi.set_source() puts
-   a ``#define _CFFI_NO_LIMITED_API'' at the start of this file if it is
-   running on Windows < 3.5, as an attempt at fixing it, but that's
-   arguably wrong because it may not be the target version of Python.
-   Still better than nothing I guess.  As another workaround, you can
-   remove the definition of Py_LIMITED_API here.
-
    See also 'py_limited_api' in cffi/setuptools_ext.py.
 */
 #if !defined(_CFFI_USE_EMBEDDING) && !defined(Py_LIMITED_API)
