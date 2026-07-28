@@ -1,4 +1,4 @@
-import io, os, sys, sysconfig
+import io, os, sys
 from . import ffiplatform, model
 from .error import VerificationError
 from .cffi_opcode import *
@@ -7,11 +7,12 @@ VERSION_BASE = 0x2601
 VERSION_EMBEDDED = 0x2701
 VERSION_CHAR16CHAR32 = 0x2801
 
-FREE_THREADED_BUILD = sysconfig.get_config_var("Py_GIL_DISABLED")
-USE_LIMITED_API = ((sys.platform != 'win32' or sys.version_info < (3, 0) or
-                   sys.version_info >= (3, 5)) and
-                   # free-threaded build doesn't support the stable ABI until Python 3.15
-                   (not FREE_THREADED_BUILD or sys.version_info >= (3, 15)))
+# Must not depend on the interpreter running the generator: the generated
+# source may be compiled for a different one (see cffi-gen-src).  Decisions
+# about the target, such as abi3t support, are made at compile time in
+# _cffi_include.h.
+USE_LIMITED_API = (sys.platform != 'win32' or sys.version_info < (3, 0) or
+                   sys.version_info >= (3, 5))
 
 class GlobalExpr:
     def __init__(self, name, address, type_op, size=0, check_value=0):

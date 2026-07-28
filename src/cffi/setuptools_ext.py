@@ -92,7 +92,11 @@ def _set_py_limited_api(Extension, kwds):
     from cffi import recompiler
 
     if ('py_limited_api' not in kwds and not hasattr(sys, 'gettotalrefcount')
-            and recompiler.USE_LIMITED_API):
+            and recompiler.USE_LIMITED_API
+            # unlike USE_LIMITED_API, checking the running interpreter is
+            # correct here: setuptools generates and compiles in one process
+            and (not sysconfig.get_config_var("Py_GIL_DISABLED")
+                 or sys.version_info >= (3, 15))):
         import setuptools
         try:
             setuptools_major_version = int(setuptools.__version__.partition('.')[0])

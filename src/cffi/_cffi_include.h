@@ -26,11 +26,16 @@
    See also 'py_limited_api' in cffi/setuptools_ext.py.
 */
 #if !defined(_CFFI_USE_EMBEDDING) && !defined(Py_LIMITED_API)
+#  include <patchlevel.h>   /* for PY_VERSION_HEX; self-contained */
 #  ifdef _MSC_VER
 #    if !defined(_DEBUG) && !defined(Py_DEBUG) && !defined(Py_TRACE_REFS) && !defined(Py_REF_DEBUG) && !defined(_CFFI_NO_LIMITED_API)
 #      if !defined(Py_GIL_DISABLED)
 #        define Py_LIMITED_API
-#      else
+#      elif PY_VERSION_HEX >= 0x030f0000
+         /* the free-threaded build supports the limited API (the abi3t
+            stable ABI) since 3.15.  Note that on Windows pyconfig.h does
+            not define Py_GIL_DISABLED; build backends targeting the
+            free-threaded build pass it on the compiler command line. */
 #        define Py_LIMITED_API 0x030f0000
 #      endif
 #    endif
@@ -56,7 +61,9 @@
 #    if !defined(Py_DEBUG) && !defined(Py_TRACE_REFS) && !defined(Py_REF_DEBUG) && !defined(_CFFI_NO_LIMITED_API)
 #      if !defined(Py_GIL_DISABLED)
 #        define Py_LIMITED_API
-#      else
+#      elif PY_VERSION_HEX >= 0x030f0000
+         /* the free-threaded build supports the limited API (the abi3t
+            stable ABI) since 3.15 */
 #        define Py_LIMITED_API 0x030f0000
 #      endif
 #    endif
