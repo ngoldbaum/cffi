@@ -213,14 +213,11 @@ def test_import_is_inert():
     assert proc.stderr == ""
 
 
-def test_output_independent_of_generating_interpreter(tmp_path):
-    # runs on free-threaded and GIL-enabled CI alike; the output must be
-    # the same on both, with the limited-API decision left to
-    # _cffi_include.h at compile time
+def test_output_independent_of_generating_interpreter(tmp_path, run_cffi_gen_src):
+    # The output shouldn't disable the limited API explicitly for 3.14 free-threaded builds
     pyfile = tmp_path / "_squared_build.py"
     pyfile.write_text(SIMPLE_SCRIPT)
     out = tmp_path / "squared.c"
-    proc = _run([sys.executable, "-m", "cffi.gen_src"],
-                "exec-python", str(pyfile), str(out))
+    proc = run_cffi_gen_src("exec-python", str(pyfile), str(out))
     assert proc.returncode == 0, proc.stderr
     assert "#define _CFFI_NO_LIMITED_API" not in out.read_text().splitlines()
