@@ -147,9 +147,8 @@ static void
 thread_canary_free_zombies(void)
 {
     /* This must be called with the GIL. */
-    if (cffi_zombie_head.zombie_next == &cffi_zombie_head)
-        return;    /* fast path */
-
+    /* Thread shutdown modifies the list without the GIL.  Even the empty
+       list check must hold TLS_ZOM_LOCK. */
     while (1) {
         ThreadCanaryObj *ob;
         PyThreadState *tstate = NULL;
@@ -202,10 +201,6 @@ thread_canary_register(PyThreadState *tstate)
 
     tdict = PyThreadState_GetDict();
     if (tdict == NULL)
-        goto ignore_error;
-
-    /* Give ThreadCanary_Type a valid metatype before instantiating it. */
-    if (PyType_Ready(&ThreadCanary_Type) < 0)
         goto ignore_error;
 
     canary = PyObject_New(ThreadCanaryObj, &ThreadCanary_Type);
@@ -269,6 +264,11 @@ static PyTypeObject ThreadCanary_Type = {
 
 static void init_cffi_tls_zombie(void)
 {
+    /* Native callback threads can arrive concurrently.  Ready their type
+       during module initialization, before any canaries can be created. */
+    if (PyType_Ready(&ThreadCanary_Type) < 0)
+        return;
+
     cffi_zombie_head.zombie_next = &cffi_zombie_head;
     cffi_zombie_head.zombie_prev = &cffi_zombie_head;
     cffi_zombie_lock = PyThread_allocate_lock();
@@ -365,18 +365,14 @@ static void gil_release(PyGILState_STATE oldstate)
 
 #ifdef Py_GIL_DISABLED
 static PyObject _dummy = {0};
+#endif
+
+/* Use the same atomic publication protocol in both builds. */
 #define cffi_check_flag(arg) cffi_atomic_load_uint8(&(arg))
 #define cffi_set_flag(arg, value) cffi_atomic_store_uint8(&(arg), (value))
 #define cffi_set_size(arg, value) cffi_atomic_store_ssize(&(arg)->ct_size, (value))
 #define cffi_get_size(arg) cffi_atomic_load_ssize(&(arg)->ct_size)
 #define _CFFI_LOAD_OP(arg) cffi_atomic_load(&(arg))
-#else
-#define cffi_check_flag(arg) (arg)
-#define cffi_set_flag(arg, value) (arg) = (value)
-#define cffi_set_size(arg, value) (arg)->ct_size = (value)
-#define cffi_get_size(arg) (arg)->ct_size
-#define _CFFI_LOAD_OP(arg) (arg)
-#endif
 
 #define CFFI_LOCK() Py_BEGIN_CRITICAL_SECTION(&_dummy)
 #define CFFI_UNLOCK() Py_END_CRITICAL_SECTION()

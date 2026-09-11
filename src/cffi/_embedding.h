@@ -17,8 +17,8 @@ extern "C" {
 
 /* There are two global variables of type _cffi_call_python_fnptr:
 
-   * _cffi_call_python, which we declare just below, is the one called
-     by ``extern "Python"`` implementations.
+   * _cffi_call_python_addr, which is loaded atomically by the
+     _cffi_call_python() wrapper used by ``extern "Python"`` implementations.
 
    * _cffi_call_python_org, which on CPython is actually part of the
      _cffi_exports[] array, is the function pointer copied from
@@ -34,28 +34,39 @@ extern "C" {
 #undef _cffi_call_python
 typedef void (*_cffi_call_python_fnptr)(struct _cffi_externpy_s *, char *);
 static void _cffi_start_and_call_python(struct _cffi_externpy_s *, char *);
-static _cffi_call_python_fnptr _cffi_call_python = &_cffi_start_and_call_python;
+static _cffi_call_python_fnptr _cffi_call_python_addr = &_cffi_start_and_call_python;
 
 
 #ifndef _MSC_VER
-   /* --- Assuming a GCC not infinitely old --- */
-# define cffi_compare_and_swap(l,o,n)  __sync_bool_compare_and_swap(l,o,n)
-# define cffi_write_barrier()          __sync_synchronize()
-# if !defined(__amd64__) && !defined(__x86_64__) &&   \
-     !defined(__i386__) && !defined(__i386)
-#   define cffi_read_barrier()         __sync_synchronize()
-# else
-#   define cffi_read_barrier()         (void)0
-# endif
+   /* --- GCC-compatible atomic builtins --- */
+# define cffi_compare_and_swap_pointer(l,o,n) __sync_bool_compare_and_swap(l,o,n)
+# define cffi_compare_and_swap_int(l,o,n) __sync_bool_compare_and_swap(l,o,n)
+# define cffi_atomic_load_pointer(l)  __atomic_load_n(l, __ATOMIC_ACQUIRE)
+# define cffi_atomic_store_pointer(l,n) __atomic_store_n(l,n,__ATOMIC_RELEASE)
+# define cffi_atomic_load_int(l)      __atomic_load_n(l, __ATOMIC_ACQUIRE)
 #else
    /* --- Windows threads version --- */
 # include <Windows.h>
-# define cffi_compare_and_swap(l,o,n) \
-                               (InterlockedCompareExchangePointer(l,n,o) == (o))
-# define cffi_write_barrier()       InterlockedCompareExchange(&_cffi_dummy,0,0)
-# define cffi_read_barrier()           (void)0
-static volatile LONG _cffi_dummy;
+# define cffi_compare_and_swap_pointer(l,o,n) \
+    (InterlockedCompareExchangePointer((void *volatile *)(l), \
+        (void *)(n), (void *)(o)) == (void *)(o))
+# define cffi_compare_and_swap_int(l,o,n) \
+    (InterlockedCompareExchange((LONG volatile *)(l), \
+        (LONG)(n), (LONG)(o)) == (LONG)(o))
+# define cffi_atomic_load_pointer(l) \
+    ReadPointerAcquire((void *const volatile *)(l))
+# define cffi_atomic_store_pointer(l,n) \
+    InterlockedExchangePointer((void *volatile *)(l), (void *)(n))
+# define cffi_atomic_load_int(l) \
+    ReadAcquire((LONG const volatile *)(l))
 #endif
+
+static void _cffi_call_python(struct _cffi_externpy_s *externpy, char *args)
+{
+    _cffi_call_python_fnptr fnptr = (_cffi_call_python_fnptr)
+        cffi_atomic_load_pointer(&_cffi_call_python_addr);
+    fnptr(externpy, args);
+}
 
 #ifdef WITH_THREAD
 # ifndef _MSC_VER
@@ -71,7 +82,7 @@ static void _cffi_acquire_reentrant_mutex(void)
 {
     static void *volatile lock = NULL;
 
-    while (!cffi_compare_and_swap(&lock, NULL, (void *)1)) {
+    while (!cffi_compare_and_swap_pointer(&lock, NULL, (void *)1)) {
         /* should ideally do a spin loop instruction here, but
            hard to do it portably and doesn't really matter I
            think: pthread_mutex_init() should be very fast, and
@@ -85,6 +96,7 @@ static void _cffi_acquire_reentrant_mutex(void)
         pthread_mutexattr_init(&attr);
         pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
         pthread_mutex_init(&_cffi_embed_startup_lock, &attr);
+        pthread_mutexattr_destroy(&attr);
 # else
         InitializeCriticalSection(&_cffi_embed_startup_lock);
 # endif
@@ -92,7 +104,7 @@ static void _cffi_acquire_reentrant_mutex(void)
     }
 #endif
 
-    while (!cffi_compare_and_swap(&lock, (void *)1, NULL))
+    while (!cffi_compare_and_swap_pointer(&lock, (void *)1, NULL))
         ;
 
 #ifndef _MSC_VER
@@ -289,21 +301,27 @@ static int _cffi_carefully_make_gil(void)
 
 #ifdef WITH_THREAD
 #  if PY_VERSION_HEX < 0x030C0000
+#    define cffi_compare_and_swap_gil cffi_compare_and_swap_int
     int volatile *lock = (int volatile *)&PyCapsule_Type.tp_version_tag;
     int old_value, locked_value = -42;
     assert(!(PyCapsule_Type.tp_flags & Py_TPFLAGS_HAVE_VERSION_TAG));
 #  else
-    static struct ebp_s { PyBufferProcs buf; int mark; } empty_buffer_procs;
-    empty_buffer_procs.mark = -42;
+#    define cffi_compare_and_swap_gil cffi_compare_and_swap_pointer
+    static struct ebp_s { PyBufferProcs buf; int mark; }
+        empty_buffer_procs = { {0}, -42 };
     PyBufferProcs *volatile *lock = (PyBufferProcs *volatile *)
         &PyCapsule_Type.tp_as_buffer;
     PyBufferProcs *old_value, *locked_value = &empty_buffer_procs.buf;
 #  endif
 
     while (1) {    /* spin loop */
-        old_value = *lock;
+#  if PY_VERSION_HEX < 0x030C0000
+        old_value = cffi_atomic_load_int(lock);
+#  else
+        old_value = (PyBufferProcs *)cffi_atomic_load_pointer(lock);
+#  endif
         if (old_value == 0) {
-            if (cffi_compare_and_swap(lock, old_value, locked_value))
+            if (cffi_compare_and_swap_gil(lock, old_value, locked_value))
                 break;
         }
         else {
@@ -334,8 +352,9 @@ static int _cffi_carefully_make_gil(void)
 
 #ifdef WITH_THREAD
     /* release the lock */
-    while (!cffi_compare_and_swap(lock, locked_value, old_value))
+    while (!cffi_compare_and_swap_gil(lock, locked_value, old_value))
         ;
+#  undef cffi_compare_and_swap_gil
 #endif
 
     return 0;
@@ -428,26 +447,17 @@ static _cffi_call_python_fnptr _cffi_start_python(void)
        time this is called, even if there are subinterpreters. */
     if (!called) {
         called = 1;  /* invoke _cffi_initialize_python() only once,
-                        but don't set '_cffi_call_python' right now,
+                        but don't set '_cffi_call_python_addr' right now,
                         otherwise concurrent threads won't call
                         this function at all (we need them to wait) */
         if (_cffi_initialize_python() == 0) {
             /* now initialization is finished.  Switch to the fast-path. */
 
-            /* We would like nobody to see the new value of
-               '_cffi_call_python' without also seeing the rest of the
-               data initialized.  However, this is not possible.  But
-               the new value of '_cffi_call_python' is the function
-               'cffi_call_python()' from _cffi_backend.  So:  */
-            cffi_write_barrier();
-            /* ^^^ we put a write barrier here, and a corresponding
-               read barrier at the start of cffi_call_python().  This
-               ensures that after that read barrier, we see everything
-               done here before the write barrier.
-            */
-
+            /* Publish the initialized interpreter and module to callers
+               that load the function pointer without either lock. */
             assert(_cffi_call_python_org != NULL);
-            _cffi_call_python = (_cffi_call_python_fnptr)_cffi_call_python_org;
+            cffi_atomic_store_pointer(&_cffi_call_python_addr,
+                (_cffi_call_python_fnptr)_cffi_call_python_org);
         }
         else {
             /* initialization failed.  Reset this to NULL, even if it was
@@ -495,17 +505,19 @@ void _cffi_start_and_call_python(struct _cffi_externpy_s *externpy, char *args)
 _CFFI_UNUSED_FN
 static int cffi_start_python(void)
 {
-    if (_cffi_call_python == &_cffi_start_and_call_python) {
+    if ((_cffi_call_python_fnptr)cffi_atomic_load_pointer(&_cffi_call_python_addr)
+            == &_cffi_start_and_call_python) {
         if (_cffi_start_python() == NULL)
             return -1;
     }
-    cffi_read_barrier();
     return 0;
 }
 
-#undef cffi_compare_and_swap
-#undef cffi_write_barrier
-#undef cffi_read_barrier
+#undef cffi_compare_and_swap_pointer
+#undef cffi_compare_and_swap_int
+#undef cffi_atomic_load_pointer
+#undef cffi_atomic_store_pointer
+#undef cffi_atomic_load_int
 
 #ifdef __cplusplus
 }

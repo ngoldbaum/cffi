@@ -74,7 +74,6 @@ static int init_global_types_dict(PyObject *ffi_type_dict)
     if (err < 0)
         return err;
 
-#ifdef Py_GIL_DISABLED
     // Ensure that all primitive types are initialised to avoid race conditions
     // on the first access.
     for (Py_ssize_t i = 0; i < _CFFI__NUM_PRIM; i++) {
@@ -82,7 +81,6 @@ static int init_global_types_dict(PyObject *ffi_type_dict)
         if (ct2 == NULL)
             return -1;
     }
-#endif
 
     return 0;
 }
@@ -351,6 +349,25 @@ static void _unrealize_name(char *target, const char *srcname)
     }
 }
 
+/* CFFI_LOCK is held, but allocation or nested realization may have
+   published this slot since the caller first read it.  Consume the new
+   reference and return a new reference to the canonical result. */
+static PyObject *publish_realized_type(_cffi_opcode_t *slot, PyObject *x)
+{
+    _cffi_opcode_t previous = _CFFI_LOAD_OP(*slot);
+    if (((uintptr_t)previous) & 1) {
+        Py_INCREF(x);
+        cffi_atomic_store(slot, x);
+    }
+    else if (previous != x) {
+        PyObject *winner = (PyObject *)previous;
+        Py_INCREF(winner);
+        Py_DECREF(x);
+        x = winner;
+    }
+    return x;
+}
+
 static PyObject *                                              /* forward */
 _fetch_external_struct_or_union(const struct _cffi_struct_union_s *s,
                                 PyObject *included_ffis, int recursion);
@@ -436,24 +453,12 @@ _realize_c_struct_or_union(builder_c_t *builder, int sindex)
         }
 
         /* Update the "primary" OP_STRUCT_UNION slot */
-        assert((((uintptr_t)x) & 1) == 0);
-        assert(builder->ctx.types[s->type_index] == op2);
-        Py_INCREF(x);
-#ifdef Py_GIL_DISABLED
-        cffi_atomic_store(&builder->ctx.types[s->type_index], x);
-#else
-        builder->ctx.types[s->type_index] = x;
-#endif
+        x = publish_realized_type(&builder->ctx.types[s->type_index], x);
         if (ct != NULL && s->size == (size_t)-2) {
-            /* oops, this struct is unnamed and we couldn't generate
-               a C expression to get its size.  We have to rely on
-               complete_struct_or_union() to compute it now. */
-            if (do_realize_lazy_struct(ct) < 0) {
-#ifdef Py_GIL_DISABLED
-                cffi_atomic_store(&builder->ctx.types[s->type_index], op2);
-#else
-                builder->ctx.types[s->type_index] = op2;
-#endif
+            /* Publish the descriptor before computing its size so
+               recursive pointers can find the canonical identity. */
+            if (do_realize_lazy_struct((CTypeDescrObject *)x) < 0) {
+                Py_DECREF(x);
                 return NULL;
             }
         }
@@ -587,14 +592,7 @@ realize_c_type_or_func_now(builder_c_t *builder, _cffi_opcode_t op,
 
             /* Update the "primary" _CFFI_OP_ENUM slot, which
                may be the same or a different slot than the "current" one */
-            assert((((uintptr_t)x) & 1) == 0);
-            assert(builder->ctx.types[e->type_index] == op2);
-            Py_INCREF(x);
-#ifdef Py_GIL_DISABLED
-            cffi_atomic_store(&builder->ctx.types[e->type_index], x);
-#else
-            builder->ctx.types[e->type_index] = x;
-#endif
+            x = publish_realized_type(&builder->ctx.types[e->type_index], x);
 
             /* Done, leave without updating the "current" slot because
                it may be done already above.  If not, never mind, the
@@ -692,16 +690,12 @@ realize_c_type_or_func_now(builder_c_t *builder, _cffi_opcode_t op,
     return x;
 }
 
-#ifdef Py_GIL_DISABLED
 #ifdef MS_WIN32
 static __declspec(thread) int _realize_recursion_level;
 #elif defined(USE__THREAD)
 static __thread int _realize_recursion_level;
 #else
 #error "Cannot detect thread-local keyword"
-#endif
-#else
-static int _realize_recursion_level;
 #endif
 
 static PyObject *
@@ -730,16 +724,8 @@ realize_c_type_or_func_lock_held(builder_c_t *builder,
     x = realize_c_type_or_func_now(builder, op, opcodes, index);
     _realize_recursion_level--;
 
-    if (x != NULL && opcodes == builder->ctx.types && opcodes[index] != x) {
-        assert((((uintptr_t)x) & 1) == 0);
-        assert((((uintptr_t)opcodes[index]) & 1) == 1);
-        Py_INCREF(x);
-#ifdef Py_GIL_DISABLED
-        cffi_atomic_store(&opcodes[index], x);
-#else
-        opcodes[index] = x;
-#endif
-    }
+    if (x != NULL && opcodes == builder->ctx.types)
+        x = publish_realized_type(&opcodes[index], x);
 
     return x;
 }
@@ -761,7 +747,7 @@ realize_c_func_return_type(builder_c_t *builder,
                            _cffi_opcode_t opcodes[], int index)
 {
     PyObject *x;
-    _cffi_opcode_t op = opcodes[index];
+    _cffi_opcode_t op = _CFFI_LOAD_OP(opcodes[index]);
 
     if ((((uintptr_t)op) & 1) == 0) {
         /* already built: assert that it is a function and fish
@@ -778,7 +764,7 @@ realize_c_func_return_type(builder_c_t *builder,
     }
     else {
         assert(_CFFI_GETOP(op) == _CFFI_OP_FUNCTION);
-        return realize_c_type(builder, opcodes, _CFFI_GETARG(opcodes[index]));
+        return realize_c_type(builder, opcodes, _CFFI_GETARG(op));
     }
 }
 
@@ -790,7 +776,7 @@ static int do_realize_lazy_struct_lock_held(CTypeDescrObject *ct)
     if (cffi_check_flag(ct->ct_lazy_field_list)) {
         builder_c_t *builder;
         char *p;
-        int n, i, sflags;
+        int n, i, sflags, flags = 0;
         const struct _cffi_struct_union_s *s;
         const struct _cffi_field_s *fld;
         PyObject *fields, *res;
@@ -842,13 +828,21 @@ static int do_realize_lazy_struct_lock_held(CTypeDescrObject *ct)
                 return -1;
             }
 
+            /* Field layout requires a size, even when the descriptor
+               is already cached.  Pointer types need no such completion. */
+            if (ctf != NULL && cffi_get_size(ctf) == -2 &&
+                    force_lazy_struct(ctf) < 0) {
+                Py_DECREF(fields);
+                return -1;
+            }
+
             if (ctf != NULL && fld->field_offset == (size_t)-1) {
                 /* unnamed struct, with field positions and sizes entirely
                    determined by complete_struct_or_union() and not checked.
                    Or, bitfields (field_size >= 0), similarly not checked. */
                 assert(fld->field_size == (size_t)-1 || fbitsize >= 0);
             }
-            else if (ctf == NULL || detect_custom_layout(ct, SF_STD_FIELD_POS,
+            else if (ctf == NULL || detect_custom_layout(ct, &flags, SF_STD_FIELD_POS,
                                      ctf->ct_size, fld->field_size,
                                      "wrong size for field '",
                                      fld->name, "'") < 0) {
@@ -871,20 +865,14 @@ static int do_realize_lazy_struct_lock_held(CTypeDescrObject *ct)
         if (s->flags & _CFFI_F_PACKED)
             sflags |= SF_PACKED;
 
-        ct->ct_extra = NULL;
-        cffi_set_flag(ct->ct_under_construction, 1);
         res = b_complete_struct_or_union_lock_held(ct, fields, s->size, s->alignment,
-                                                   sflags, 0);
-        cffi_set_flag(ct->ct_under_construction, 0);
+                                                   sflags, 0, 1);
         Py_DECREF(fields);
 
-        if (res == NULL) {
-            ct->ct_extra = builder;
+        if (res == NULL)
             return -1;
-        }
 
         assert(ct->ct_stuff != NULL);
-        cffi_set_flag(ct->ct_lazy_field_list, 0);
         Py_DECREF(res);
     }
     return ct->ct_stuff != NULL;
@@ -894,8 +882,11 @@ static int do_realize_lazy_struct_lock_held(CTypeDescrObject *ct)
 static int do_realize_lazy_struct(CTypeDescrObject *ct)
 {
     int res = 0;
+    if (Py_EnterRecursiveCall(" while completing a ctype"))
+        return -1;
     CFFI_LOCK();
     res = do_realize_lazy_struct_lock_held(ct);
     CFFI_UNLOCK();
+    Py_LeaveRecursiveCall();
     return res;
 }

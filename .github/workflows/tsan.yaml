@@ -1,0 +1,35 @@
+name: ThreadSanitizer
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Container with TSan-instrumented CPython
+        required: true
+        type: string
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    container: ${{ inputs.image }}
+    env:
+      CFLAGS: -g -O3 -fsanitize=thread
+      LDFLAGS: -fsanitize=thread
+      # Use the interpreter image's upstream list, which may be empty.
+      TSAN_OPTIONS: halt_on_error=1:suppressions=/work/tsan_suppressions/cpython.txt
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Build and install
+      run: |
+        python -c 'import sysconfig; assert "-fsanitize=thread" in sysconfig.get_config_var("PY_CFLAGS")'
+        cat /work/tsan_suppressions/cpython.txt
+        python -m pip install setuptools meson-python ninja pytest pytest-run-parallel
+        python -m pip install -v .
+
+    - name: Run concurrency regression tests
+      # These tests compile extensions before starting their own threads.
+      run: python -m pytest testing/cffi1/test_thread_safety.py -sv
+
+    - name: Run tests under pytest-run-parallel
+      run: python -m pytest src/c testing --parallel-threads=4 --skip-thread-unsafe=True --ignore-gil-enabled -sv

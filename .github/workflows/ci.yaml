@@ -73,7 +73,7 @@ jobs:
           include:
           # x86_64 manylinux
           - { spec: cp310-manylinux_x86_64, arch: x86_64, omit: ${{ env.skip_ci_redundant_jobs }} }
-          - { spec: cp311-manylinux_x86_64, arch: x86_64, omit: ${{ env.skip_ci_redundant_jobs }} }
+          - { spec: cp311-manylinux_x86_64, arch: x86_64 }
           - { spec: cp312-manylinux_x86_64, arch: x86_64, omit: ${{ env.skip_ci_redundant_jobs }} }
           - { spec: cp313-manylinux_x86_64, arch: x86_64, omit: ${{ env.skip_ci_redundant_jobs }} }          
           - { spec: cp314-manylinux_x86_64, arch: x86_64, omit: ${{ env.skip_ci_redundant_jobs }} }
@@ -560,24 +560,18 @@ jobs:
         python -m pytest --parallel-threads=4 --skip-thread-unsafe=True
 
   clang_TSAN:
-    runs-on: ubuntu-24.04
-    container: ghcr.io/nascheme/numpy-tsan:3.15t-dev
-    steps:
-    - uses: actions/checkout@v7
+    uses: ./.github/workflows/tsan.yaml
+    with:
+      image: ghcr.io/nascheme/numpy-tsan:3.15t-dev
 
-    - name: build and install
-      run: |
-        python -m pip install setuptools meson-python ninja pytest pytest-run-parallel
-        CFLAGS="-g -O3 -fsanitize=thread" python -m pip install -v .
-
-    - name: run tests under pytest-run-parallel
-      run: |
-        TSAN_OPTIONS="suppressions=$PWD/suppressions_free_threading.txt" \
-        python -m pytest --parallel-threads=4 --skip-thread-unsafe=True -sv
+  clang_TSAN_gil:
+    uses: ./.github/workflows/tsan.yaml
+    with:
+      image: ghcr.io/nascheme/cpython-tsan:3.14
 
   check:
     if: always()
-    needs: [python_sdist, linux, macos, windows, ios, clang_TSAN, pytest-run-parallel, merge_artifacts]
+    needs: [python_sdist, linux, macos, windows, ios, clang_TSAN, clang_TSAN_gil, pytest-run-parallel, merge_artifacts]
     runs-on: ubuntu-24.04
     steps:
     - name: Verify all previous jobs succeeded (provides a single check to sample for gating purposes)

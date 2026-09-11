@@ -14,7 +14,6 @@ static PyObject *_get_interpstate_dict(void)
     static PyObject *attr_name = NULL;
     PyThreadState *tstate;
     PyObject *d, *interpdict;
-    int err;
     PyInterpreterState *interp;
 
 #if PY_VERSION_HEX >= 0x030D0000
@@ -45,12 +44,13 @@ static PyObject *_get_interpstate_dict(void)
 
     d = PyDict_GetItem(interpdict, attr_name);
     if (d == NULL) {
-        d = PyDict_New();
-        if (d == NULL)
+        PyObject *candidate = PyDict_New();
+        if (candidate == NULL)
             goto error;
-        err = PyDict_SetItem(interpdict, attr_name, d);
-        Py_DECREF(d);   /* if successful, there is one ref left in interpdict */
-        if (err < 0)
+        /* Allocation may reenter registration; preserve its registry. */
+        d = PyDict_SetDefault(interpdict, attr_name, candidate);
+        Py_DECREF(candidate);
+        if (d == NULL)
             goto error;
     }
     return d;
@@ -60,7 +60,8 @@ static PyObject *_get_interpstate_dict(void)
     return NULL;
 }
 
-static PyObject *_ffi_def_extern_decorator(PyObject *outer_args, PyObject *fn)
+static PyObject *_ffi_def_extern_decorator_lock_held(PyObject *outer_args,
+                                                    PyObject *fn)
 {
     const char *s;
     PyObject *error, *onerror, *infotuple, *old1;
@@ -133,9 +134,9 @@ static PyObject *_ffi_def_extern_decorator(PyObject *outer_args, PyObject *fn)
 
     /* force _update_cache_to_call_python() to be called the next time
        the C function invokes cffi_call_python, to update the cache */
-    old1 = externpy->reserved1;
-    externpy->reserved1 = Py_None;   /* a non-NULL value */
+    old1 = cffi_atomic_load(&externpy->reserved1);
     Py_INCREF(Py_None);
+    cffi_atomic_store(&externpy->reserved1, Py_None);   /* a non-NULL value */
     Py_XDECREF(old1);
 
     /* return the function object unmodified */
@@ -149,11 +150,21 @@ static PyObject *_ffi_def_extern_decorator(PyObject *outer_args, PyObject *fn)
     return NULL;
 }
 
+static PyObject *_ffi_def_extern_decorator(PyObject *outer_args, PyObject *fn)
+{
+    PyObject *result;
+    CFFI_LOCK();
+    result = _ffi_def_extern_decorator_lock_held(outer_args, fn);
+    CFFI_UNLOCK();
+    return result;
+}
+
 
 static int _update_cache_to_call_python(struct _cffi_externpy_s *externpy)
 {
     PyObject *interpstate_dict, *interpstate_key, *infotuple, *old1, *new1;
     PyObject *old2;
+    int found;
 
     interpstate_dict = _get_interpstate_dict();
     if (interpstate_dict == NULL)
@@ -163,18 +174,23 @@ static int _update_cache_to_call_python(struct _cffi_externpy_s *externpy)
     if (interpstate_key == NULL)
         goto error;
 
-    infotuple = PyDict_GetItem(interpstate_dict, interpstate_key);
+    found = PyDict_GetItemRef(interpstate_dict, interpstate_key, &infotuple);
     Py_DECREF(interpstate_key);
-    if (infotuple == NULL)
+    if (found < 0)
+        goto error;
+    if (!found)
         return 3;    /* no ffi.def_extern() from this subinterpreter */
 
     new1 = _current_interp_key();
+    if (new1 == NULL) {
+        Py_DECREF(infotuple);
+        goto error;
+    }
     Py_INCREF(new1);
-    Py_INCREF(infotuple);
-    old1 = (PyObject *)externpy->reserved1;
+    old1 = (PyObject *)cffi_atomic_load(&externpy->reserved1);
     old2 = (PyObject *)externpy->reserved2;
-    externpy->reserved1 = new1;         /* holds a reference        */
-    externpy->reserved2 = infotuple;    /* holds a reference (issue #246) */
+    externpy->reserved2 = infotuple;    /* takes ownership */
+    cffi_atomic_store(&externpy->reserved1, new1);  /* holds a reference */
     Py_XDECREF(old1);
     Py_XDECREF(old2);
 
@@ -228,18 +244,8 @@ static void cffi_call_python(struct _cffi_externpy_s *externpy, char *args)
     */
     int err = 0;
 
-    /* This read barrier is needed for _embedding.h.  It is paired
-       with the write_barrier() there.  Without this barrier, we can
-       in theory see the following situation: the Python
-       initialization code already ran (in another thread), and the
-       '_cffi_call_python' function pointer directed execution here;
-       but any number of other data could still be seen as
-       uninitialized below.  For example, 'externpy' would still
-       contain NULLs even though it was correctly set up, or
-       'interpreter_lock' (the GIL inside CPython) would still be seen
-       as NULL, or 'autoInterpreterState' (used by
-       PyGILState_Ensure()) would be NULL or contain bogus fields.
-    */
+    /* Generated embedding modules may publish initialization with a write
+       barrier.  Pair it before accessing interpreter and module state. */
     read_barrier();
 
     save_errno();
@@ -250,21 +256,29 @@ static void cffi_call_python(struct _cffi_externpy_s *externpy, char *args)
        (interp->modules, infotuple).  The first item in this tuple is
        a random PyObject that identifies the subinterpreter.
     */
-    if (externpy->reserved1 == NULL) {
+    if (cffi_atomic_load(&externpy->reserved1) == NULL) {
         /* Not initialized!  We didn't call @ffi.def_extern() on this
            externpy object from any subinterpreter at all. */
         err = 1;
     }
     else {
         PyGILState_STATE state = gil_ensure();
-        if (externpy->reserved1 != _current_interp_key()) {
+        PyObject *infotuple = NULL;
+        CFFI_LOCK();
+        if (cffi_atomic_load(&externpy->reserved1) != _current_interp_key()) {
             /* Update the (reserved1, reserved2) cache.  This will fail
                if we didn't call @ffi.def_extern() in this particular
                subinterpreter. */
             err = _update_cache_to_call_python(externpy);
         }
         if (!err) {
-            general_invoke_callback(0, args, args, externpy->reserved2);
+            infotuple = (PyObject *)externpy->reserved2;
+            /* reserved2 is only stable while CFFI_LOCK is held. */
+            Py_INCREF(infotuple);
+        }
+        CFFI_UNLOCK();
+        if (infotuple != NULL) {
+            general_invoke_callback(0, args, args, infotuple);
         }
         gil_release(state);
     }
