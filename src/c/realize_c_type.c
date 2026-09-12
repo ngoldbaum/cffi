@@ -750,9 +750,9 @@ realize_c_type_or_func(builder_c_t *builder,
                         _cffi_opcode_t opcodes[], int index)
 {
     PyObject *x;
-    CFFI_LOCK();
+    CFFI_LOCK_NO_GC();
     x = realize_c_type_or_func_lock_held(builder, opcodes, index);
-    CFFI_UNLOCK();
+    CFFI_UNLOCK_NO_GC();
     return x;
 }
 
@@ -894,8 +894,8 @@ static int do_realize_lazy_struct_lock_held(CTypeDescrObject *ct)
 static int do_realize_lazy_struct(CTypeDescrObject *ct)
 {
     int res = 0;
-    CFFI_LOCK();
+    CFFI_LOCK_NO_GC();
     res = do_realize_lazy_struct_lock_held(ct);
-    CFFI_UNLOCK();
+    CFFI_UNLOCK_NO_GC();
     return res;
 }

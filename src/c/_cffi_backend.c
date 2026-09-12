@@ -204,8 +204,13 @@ static int PyWeakref_GetRef(PyObject *ref, PyObject **pobj)
 # define LOCK_UNIQUE_CACHE()   PyMutex_Lock(&unique_cache_lock)
 # define UNLOCK_UNIQUE_CACHE() PyMutex_Unlock(&unique_cache_lock)
 #else
-# define LOCK_UNIQUE_CACHE()   ((void)0)
-# define UNLOCK_UNIQUE_CACHE() ((void)0)
+# if PY_VERSION_HEX < 0x030C0000
+#  define LOCK_UNIQUE_CACHE()   int _cffi_gc_enabled = PyGC_Disable()
+#  define UNLOCK_UNIQUE_CACHE() if (_cffi_gc_enabled) PyGC_Enable()
+# else
+#  define LOCK_UNIQUE_CACHE()   ((void)0)
+#  define UNLOCK_UNIQUE_CACHE() ((void)0)
+# endif
 #endif
 
 /************************************************************/
@@ -5529,9 +5534,11 @@ static PyObject *b_complete_struct_or_union_lock_held(CTypeDescrObject *ct,
     Py_INCREF(res);
 
 finally:;
-    if (res == NULL) {
+    if (res == NULL && interned_fields != NULL) {
+        /* undo a partially built field list; leave an already complete
+           type (rejected above) untouched */
         ct->ct_extra = NULL;
-        Py_XDECREF(interned_fields);
+        Py_DECREF(interned_fields);
     }
     return res;
 }
@@ -5552,10 +5559,42 @@ static PyObject *b_complete_struct_or_union(PyObject *self, PyObject *args)
                           &pack))
         return NULL;
 
+    /* Coerce user objects (str subclasses, __index__) before the locked
+       region, so that nothing inside it can run Python code. */
+    Py_ssize_t i, n = PyList_GET_SIZE(fields);
+    PyObject *normalized = PyList_New(n);
+    if (normalized == NULL)
+        return NULL;
+    for (i = 0; i < n; i++) {
+        PyObject *fname, *name, *item;
+        CTypeDescrObject *ftype;
+        int fbitsize = -1;
+        Py_ssize_t foffset = -1;
+        if (!PyArg_ParseTuple(PyList_GET_ITEM(fields, i), "O!O!|in:list item",
+                              &PyUnicode_Type, &fname,
+                              &CTypeDescr_Type, &ftype,
+                              &fbitsize, &foffset)) {
+            Py_DECREF(normalized);
+            return NULL;
+        }
+        name = PyUnicode_FromObject(fname);
+        if (name == NULL) {
+            Py_DECREF(normalized);
+            return NULL;
+        }
+        item = Py_BuildValue("(NOin)", name, ftype, fbitsize, foffset);
+        if (item == NULL) {
+            Py_DECREF(normalized);
+            return NULL;
+        }
+        PyList_SET_ITEM(normalized, i, item);
+    }
+
     PyObject *res;
-    CFFI_LOCK();
-    res = b_complete_struct_or_union_lock_held(ct, fields, totalsize, totalalignment, sflags, pack);
-    CFFI_UNLOCK();
+    CFFI_LOCK_NO_GC();
+    res = b_complete_struct_or_union_lock_held(ct, normalized, totalsize, totalalignment, sflags, pack);
+    CFFI_UNLOCK_NO_GC();
+    Py_DECREF(normalized);
     return res;
 }
 

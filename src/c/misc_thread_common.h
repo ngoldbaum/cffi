@@ -381,4 +381,16 @@ static PyObject _dummy = {0};
 #define CFFI_LOCK() Py_BEGIN_CRITICAL_SECTION(&_dummy)
 #define CFFI_UNLOCK() Py_END_CRITICAL_SECTION()
 
+/* For regions that allocate GC-tracked objects.  Before 3.12 such an
+   allocation can run a collection and therefore Python finalizers, which
+   may reenter CFFI or release the GIL; pausing the collector makes the
+   region a plain critical section, as it already is on 3.12+. */
+#if PY_VERSION_HEX < 0x030C0000
+#define CFFI_LOCK_NO_GC() { int _cffi_gc_enabled = PyGC_Disable();
+#define CFFI_UNLOCK_NO_GC() if (_cffi_gc_enabled) PyGC_Enable(); }
+#else
+#define CFFI_LOCK_NO_GC() CFFI_LOCK()
+#define CFFI_UNLOCK_NO_GC() CFFI_UNLOCK()
+#endif
+
 #endif /* CFFI_MISC_THREAD_COMMON_H */
