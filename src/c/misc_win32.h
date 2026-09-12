@@ -17,14 +17,19 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL,
                     LPVOID    reserved)
 {
     LPVOID p;
+    DWORD index;
 
     switch (reason_for_call) {
 
     case DLL_THREAD_DETACH:
-        if (cffi_tls_index != TLS_OUT_OF_INDEXES) {
-            p = TlsGetValue(cffi_tls_index);
+        /* Another thread can finish while module initialization publishes
+           the TLS slot.  DllMain does not hold the GIL or a critical section. */
+        index = (DWORD)InterlockedCompareExchange(
+            (LONG volatile *)&cffi_tls_index, 0, 0);
+        if (index != TLS_OUT_OF_INDEXES) {
+            p = TlsGetValue(index);
             if (p != NULL) {
-                TlsSetValue(cffi_tls_index, NULL);
+                TlsSetValue(index, NULL);
                 cffi_thread_shutdown(p);
             }
         }
@@ -39,9 +44,11 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL,
 static void init_cffi_tls(void)
 {
     if (cffi_tls_index == TLS_OUT_OF_INDEXES) {
-        cffi_tls_index = TlsAlloc();
-        if (cffi_tls_index == TLS_OUT_OF_INDEXES)
+        DWORD index = TlsAlloc();
+        if (index == TLS_OUT_OF_INDEXES)
             PyErr_SetString(PyExc_WindowsError, "TlsAlloc() failed");
+        else
+            InterlockedExchange((LONG volatile *)&cffi_tls_index, (LONG)index);
     }
 }
 
@@ -204,7 +211,8 @@ static int dlclose(void *handle)
 
 static const char *dlerror(void)
 {
-    static char buf[32];
+    /* Keep each thread's error text alive until its next dlerror() call. */
+    static __declspec(thread) char buf[32];
     DWORD dw = GetLastError();
     if (dw == 0)
         return NULL;
@@ -216,7 +224,7 @@ static const char *dlerror(void)
 static int cffi_atomic_compare_exchange(void **ptr, void **expected,
                                         void *value)
 {
-    void *initial = _InterlockedCompareExchangePointer(ptr, value, expected);
+    void *initial = _InterlockedCompareExchangePointer(ptr, value, *expected);
     if (initial == *expected) {
         return 1;
     }
@@ -229,7 +237,7 @@ static void *cffi_atomic_load(void **ptr)
 #if defined(__GNUC__) || defined(__clang__)
     return __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
 #elif defined(_M_X64) || defined(_M_IX86)
-    return *(volatile void **)ptr;
+    return *(void *volatile *)ptr;
 #elif defined(_M_ARM64)
     return (void *)__ldar64((volatile unsigned __int64 *)ptr);
 #else
@@ -267,8 +275,10 @@ static void cffi_atomic_store_ssize(Py_ssize_t *ptr, Py_ssize_t value)
 {
 #if defined(__GNUC__) || defined(__clang__)
     __atomic_store_n(ptr, value, __ATOMIC_SEQ_CST);
+#elif defined(_WIN64)
+    _InterlockedExchange64((volatile __int64 *)ptr, (__int64)value);
 #else
-    _InterlockedExchangePointer(ptr, value);
+    _InterlockedExchange((volatile long *)ptr, (long)value);
 #endif
 }
 

@@ -50,42 +50,45 @@ static struct cffi_tls_s *get_cffi_tls(void)
 #define save_errno      save_errno_only
 #define restore_errno   restore_errno_only
 
-#ifdef Py_GIL_DISABLED
-# ifndef __ATOMIC_SEQ_CST
-#  error "The free threading build needs atomic support"
-# endif
+#ifndef __ATOMIC_SEQ_CST
+# error "CFFI needs atomic support"
+#endif
 
 /* Minimal atomic support */
-static void *cffi_atomic_load(void **ptr)
+static inline int cffi_atomic_compare_exchange(void **ptr, void **expected, void *value)
+{
+    return __atomic_compare_exchange_n(ptr, expected, value, 0,
+                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+static inline void *cffi_atomic_load(void **ptr)
 {
     return __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
 }
 
-static void cffi_atomic_store(void **ptr, void *value)
+static inline void cffi_atomic_store(void **ptr, void *value)
 {
     __atomic_store_n(ptr, value, __ATOMIC_SEQ_CST);
 }
 
-static uint8_t cffi_atomic_load_uint8(uint8_t *ptr)
+static inline uint8_t cffi_atomic_load_uint8(uint8_t *ptr)
 {
     return __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
 }
 
-static void cffi_atomic_store_uint8(uint8_t *ptr, uint8_t value)
+static inline void cffi_atomic_store_uint8(uint8_t *ptr, uint8_t value)
 {
     __atomic_store_n(ptr, value, __ATOMIC_SEQ_CST);
 }
 
-static Py_ssize_t cffi_atomic_load_ssize(Py_ssize_t *ptr)
+static inline Py_ssize_t cffi_atomic_load_ssize(Py_ssize_t *ptr)
 {
     return __atomic_load_n(ptr, __ATOMIC_SEQ_CST);
 }
 
-static void cffi_atomic_store_ssize(Py_ssize_t *ptr, Py_ssize_t value)
+static inline void cffi_atomic_store_ssize(Py_ssize_t *ptr, Py_ssize_t value)
 {
     __atomic_store_n(ptr, value, __ATOMIC_SEQ_CST);
 }
-
-#endif
 
 #endif /* CFFI_MISC_THREAD_POSIX_H */

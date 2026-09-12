@@ -308,7 +308,7 @@ static PyObject *lib_build_and_cache_attr(LibObject *lib, PyObject *name,
         if (ct == NULL)
             return NULL;
 
-        if (ct->ct_size <= 0) {
+        if (cffi_get_size(ct) <= 0) {
             PyErr_Format(FFIError, "constant '%s' is of type '%s', "
                          "whose size is not known", s, ct->ct_name);
             return NULL;
@@ -336,7 +336,7 @@ static PyObject *lib_build_and_cache_attr(LibObject *lib, PyObject *name,
                less-common cases more suspicious.
             */
             assert(_CFFI_GETOP(g->type_op) == _CFFI_OP_CONSTANT);
-            data = PyMem_Malloc(ct->ct_size);
+            data = PyMem_Malloc(cffi_get_size(ct));
             if (data == NULL) {
                 PyErr_NoMemory();
                 return NULL;
@@ -359,11 +359,11 @@ static PyObject *lib_build_and_cache_attr(LibObject *lib, PyObject *name,
                             _CFFI_GETARG(g->type_op));
         if (ct == NULL)
             return NULL;
-        if (g_size != ct->ct_size && g_size != 0 && ct->ct_size > 0) {
+        if (g_size != cffi_get_size(ct) && g_size != 0 && cffi_get_size(ct) > 0) {
             PyErr_Format(FFIError,
                          "global variable '%.200s' should be %zd bytes "
                          "according to the cdef, but is actually %zd",
-                         s, ct->ct_size, g_size);
+                         s, cffi_get_size(ct), g_size);
             x = NULL;
         }
         else {
@@ -432,10 +432,11 @@ static PyObject *lib_build_and_cache_attr(LibObject *lib, PyObject *name,
 
  found:
     if (x != NULL) {
-        int err = PyDict_SetItem(lib->l_dict, name, x);
+        /* Keep the first published value.  Readers borrow references from
+           this cache, so another realization must not replace an entry. */
+        PyObject *cached = PyDict_SetDefault(lib->l_dict, name, x);
         Py_DECREF(x);
-        if (err < 0)     /* else there is still one ref left in the dict */
-            return NULL;
+        x = cached;
     }
     return x;
 }
@@ -666,11 +667,13 @@ static PyObject* try_extract_directfnptr(PyObject *x)
     /* returns: borrowed ref or NULL */
     LibObject *lib;
     PyObject *ct;
+    void *cached;
     struct CPyExtFunc_s *exf = _cpyextfunc_get(x);
     if (exf == NULL)
         return NULL;       /* wrong type */
-    if (exf->direct_fn_cdata != NULL)
-        return exf->direct_fn_cdata;    /* common case: cached */
+    cached = cffi_atomic_load((void **)&exf->direct_fn_cdata);
+    if (cached != NULL)
+        return (PyObject *)cached;    /* common case: cached */
 
     if (exf->direct_fn == NULL)
         return x;          /* backward compatibility: no direct_fn */
@@ -682,7 +685,12 @@ static PyObject* try_extract_directfnptr(PyObject *x)
 
     x = new_simple_cdata(exf->direct_fn, (CTypeDescrObject *)ct);
     Py_DECREF(ct);
-    exf->direct_fn_cdata = x;  /* caches x, which becomes immortal like exf */
+    if (x != NULL && !cffi_atomic_compare_exchange(
+            (void **)&exf->direct_fn_cdata, &cached, x)) {
+        Py_DECREF(x);
+        x = (PyObject *)cached;
+    }
+    /* The cached reference lives as long as exf, which is immortal. */
     return x;
 }
 

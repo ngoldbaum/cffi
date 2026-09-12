@@ -146,10 +146,8 @@ thread_canary_make_zombie(ThreadCanaryObj *ob)
 static void
 thread_canary_free_zombies(void)
 {
-    /* This must be called with the GIL. */
-    if (cffi_zombie_head.zombie_next == &cffi_zombie_head)
-        return;    /* fast path */
-
+    /* This must be called with the GIL.  Thread shutdown modifies the list
+       without the GIL, so even the empty check needs TLS_ZOM_LOCK. */
     while (1) {
         ThreadCanaryObj *ob;
         PyThreadState *tstate = NULL;
@@ -202,10 +200,6 @@ thread_canary_register(PyThreadState *tstate)
 
     tdict = PyThreadState_GetDict();
     if (tdict == NULL)
-        goto ignore_error;
-
-    /* Give ThreadCanary_Type a valid metatype before instantiating it. */
-    if (PyType_Ready(&ThreadCanary_Type) < 0)
         goto ignore_error;
 
     canary = PyObject_New(ThreadCanaryObj, &ThreadCanary_Type);
@@ -269,6 +263,11 @@ static PyTypeObject ThreadCanary_Type = {
 
 static void init_cffi_tls_zombie(void)
 {
+    /* Native callback threads can arrive concurrently: ready the type once,
+       during module initialization. */
+    if (PyType_Ready(&ThreadCanary_Type) < 0)
+        return;
+
     cffi_zombie_head.zombie_next = &cffi_zombie_head;
     cffi_zombie_head.zombie_prev = &cffi_zombie_head;
     cffi_zombie_lock = PyThread_allocate_lock();

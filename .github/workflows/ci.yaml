@@ -575,6 +575,13 @@ jobs:
         TSAN_OPTIONS="suppressions=$PWD/suppressions_free_threading.txt" \
         python -m pytest --parallel-threads=4 --skip-thread-unsafe=True -sv
 
+    - name: run concurrency regression tests
+      # These tests compile extensions before starting their own threads.
+      run: |
+        CFLAGS="-g -O3 -fsanitize=thread" \
+        TSAN_OPTIONS="suppressions=$PWD/suppressions_free_threading.txt" \
+        python -m pytest testing/cffi1/test_thread_safety.py -sv
+
   check:
     if: always()
     needs: [python_sdist, linux, macos, windows, ios, clang_TSAN, pytest-run-parallel, merge_artifacts]
